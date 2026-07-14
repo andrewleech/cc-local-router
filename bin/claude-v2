@@ -1,0 +1,167 @@
+#!/bin/bash
+# Wrapper for the model-alias-patched Claude Code binary.
+#
+# Sets ANTHROPIC_CUSTOM_MODEL_OPTION so the alias appears in the
+# /model picker with a proper label + description. The patched binary
+# already accepts the alias at every validation gate; the env var
+# only affects what the interactive picker renders.
+#
+# ANTHROPIC_BASE_URL defaults to the local cc-local-router
+# model-splitter proxy, which routes `local` → local inference server
+# and everything else → api.anthropic.com. The proxy is spawned on
+# demand if it isn't already answering /healthz.
+#
+# All env vars below are overridable so power users can change the
+# alias, redirect to a different upstream, or bring their own API key
+# without re-patching.
+
+: "${ANTHROPIC_CUSTOM_MODEL_OPTION:=local}"
+: "${ANTHROPIC_CUSTOM_MODEL_OPTION_NAME:=Local}"
+: "${ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION:=Local inference server (via cc-local-router proxy)}"
+: "${ANTHROPIC_BASE_URL:=http://127.0.0.1:8787}"
+
+# Force Tool Search on. Without this, Claude Code's optimistic heuristic
+# silently disables tool-search deferral when ANTHROPIC_BASE_URL points
+# somewhere other than api.anthropic.com — MCP schemas then get loaded
+# upfront and eat 25-30k+ tokens of context per session. Setting the
+# env var makes the client send the `tool-search-tool-2025-10-19`
+# beta header regardless of provider detection; our proxy is a pure
+# passthrough so the header reaches Anthropic and deferral kicks in.
+: "${ENABLE_TOOL_SEARCH:=true}"
+
+# Raise the stream idle timeout. The client aborts a streaming response
+# if no bytes arrive within CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS. Defaults
+# vary (180s first-party, 300s other) but a Statsig experiment can push
+# it down to ~60s, which fires spuriously during Opus 4.8 extended
+# thinking where Anthropic sometimes goes 60-90s between output chunks.
+# Env var beats the experiment; clamp is 1..1800000 ms.
+: "${CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS:=600000}"
+
+# Disable the byte watchdog entirely as a belt-and-braces measure. Even
+# with the timeout above bumped, an ~58s abort still fires — likely
+# because the watchdog's abort path is triggered by a companion timer
+# we haven't traced. Setting this to false makes Z$i() return false and
+# G5d skip the F5d body-wrapping, so the raw fetch stream flows without
+# any client-side idle enforcement.
+: "${CLAUDE_ENABLE_BYTE_WATCHDOG:=false}"
+: "${CLAUDE_ENABLE_STREAM_WATCHDOG:=false}"
+
+export ANTHROPIC_CUSTOM_MODEL_OPTION
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME
+export ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION
+export ANTHROPIC_BASE_URL
+export ENABLE_TOOL_SEARCH
+export CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS
+export CLAUDE_ENABLE_BYTE_WATCHDOG
+export CLAUDE_ENABLE_STREAM_WATCHDOG
+
+# When ANTHROPIC_API_KEY is set, Claude Code prefers it over the OAuth
+# login stored in ~/.claude/.credentials.json — even a stray value in
+# the outer shell will hijack the user's Anthropic subscription auth.
+# Unset it here so OAuth wins by default. Escape hatch:
+# `CLAUDE_V2_FORCE_API_KEY=<key> claude-v2 ...` per-invocation, or
+# export CLAUDE_V2_FORCE_API_KEY in the shell before launching.
+if [ -n "${CLAUDE_V2_FORCE_API_KEY:-}" ]; then
+    export ANTHROPIC_API_KEY="$CLAUDE_V2_FORCE_API_KEY"
+else
+    unset ANTHROPIC_API_KEY
+fi
+
+auto_approve_api_key() {
+    local key="${ANTHROPIC_API_KEY:-}"
+    [ -n "$key" ] || return 0
+    local config="$HOME/.claude.json"
+    [ -f "$config" ] || return 0
+    CLAUDE_JSON="$config" CLAUDE_KEY="$key" python3 - <<'PY' 2>/dev/null || true
+import json, os
+path, key = os.environ['CLAUDE_JSON'], os.environ['CLAUDE_KEY']
+short = key[-20:]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    raise SystemExit(0)
+resp = d.setdefault("customApiKeyResponses", {})
+approved = resp.setdefault("approved", [])
+rejected = resp.setdefault("rejected", [])
+changed = False
+if short not in approved:
+    approved.append(short)
+    changed = True
+if short in rejected:
+    rejected.remove(short)
+    changed = True
+if changed:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, path)
+PY
+}
+
+auto_approve_api_key
+
+# ── Start the proxy if it's not up ──────────────────────────────────────
+# The proxy is a plain Bun process; nohup'd + detached so it survives
+# the launcher exiting. Skipped when ANTHROPIC_BASE_URL points somewhere
+# other than the loopback default (user knows what they're doing).
+
+ensure_proxy_running() {
+    # Only auto-start when the base URL is the loopback default.
+    case "$ANTHROPIC_BASE_URL" in
+        http://127.0.0.1:*|http://localhost:*) ;;
+        *) return 0 ;;
+    esac
+
+    if curl -sSf --max-time 1 "$ANTHROPIC_BASE_URL/healthz" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local repo="${CC_LOCAL_ROUTER_REPO:-$HOME/cc-local-router}"
+    local proxy_entry="$repo/proxy/index.ts"
+    if [ ! -f "$proxy_entry" ]; then
+        echo "[claude-v2] proxy not up and $proxy_entry not found; expected" \
+            "ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL to answer /healthz" >&2
+        return 1
+    fi
+    if ! command -v bun >/dev/null 2>&1; then
+        echo "[claude-v2] bun not on PATH; cannot start proxy" >&2
+        return 1
+    fi
+
+    local state_dir="$HOME/.local/state/cc-local-router"
+    mkdir -p "$state_dir"
+    local log="$state_dir/proxy.log"
+    # setsid detaches from the current session so a SIGTERM sent to
+    # the launcher's process group (e.g. by `timeout`) doesn't take
+    # the proxy down with it. nohup alone is not sufficient on Linux.
+    #
+    # --watch makes Bun reload the module on source changes, so edits
+    # to proxy/*.ts take effect without a manual bounce.
+    (
+        cd "$repo"
+        setsid bun --watch proxy/index.ts </dev/null >>"$log" 2>&1 &
+        echo $! >"$state_dir/proxy.pid"
+    )
+    disown 2>/dev/null || true
+
+    # Wait up to ~3 s for it to answer /healthz.
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.3
+        if curl -sSf --max-time 1 "$ANTHROPIC_BASE_URL/healthz" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    echo "[claude-v2] proxy did not come up within 3s (see $log)" >&2
+    return 1
+}
+
+ensure_proxy_running
+
+# `cc-patcher launch` resolves the real Claude Code binary, applies
+# every patch discovered from installed providers (this package's
+# model-alias + availability-gate patches, plus claude-net-patcher's
+# channel patches if that's also installed), caches the result, and
+# execs it with the given argv unchanged.
+exec cc-patcher launch -- "$@"

@@ -1,0 +1,129 @@
+#!/bin/bash
+set -euo pipefail
+# claude-channels-v2: same shape as claude-net-patcher's claude-channels,
+# but layered on top of claude-v2 (this package's model-alias wrapper)
+# instead of patching in-place.
+#
+# claude-v2 handles:
+#   - env var setup (ANTHROPIC_BASE_URL, ANTHROPIC_CUSTOM_MODEL_OPTION*)
+#   - proxy startup if needed
+#   - `cc-patcher launch` (resolve + patch + cache + exec the real binary)
+#
+# This wrapper adds what claude-channels does at runtime for the
+# channel patches: MCP-server channel-arg injection and the mirror-
+# agent daemon. Both are independent of which provider patches were
+# applied to the binary, so this wrapper works whether or not
+# claude-net-patcher's channel patches are installed alongside this
+# package's model-alias patches.
+
+CLAUDE_V2="${CLAUDE_V2:-$HOME/.local/bin/claude-v2}"
+
+if [ ! -x "$CLAUDE_V2" ]; then
+    echo "[claude-channels-v2] $CLAUDE_V2 not executable; expected the v2 wrapper" >&2
+    exit 1
+fi
+
+# ── Auto-detect channel MCP servers from ~/.claude.json ──────────────────
+
+find_channel_servers() {
+    local config="$HOME/.claude.json"
+    [ -f "$config" ] || return
+    CLAUDE_JSON="$config" PROJECT_DIR="$(pwd)" python3 - <<'PY' 2>/dev/null || true
+import json, os
+seen = set()
+try:
+    with open(os.environ['CLAUDE_JSON']) as f:
+        d = json.load(f)
+    cwd = os.environ['PROJECT_DIR']
+    for name in d.get('mcpServers', {}).keys():
+        if name not in seen:
+            seen.add(name)
+            print(f'server:{name}')
+    for proj_path, proj in d.get('projects', {}).items():
+        if proj_path == cwd:
+            for name in proj.get('mcpServers', {}).keys():
+                if name not in seen:
+                    seen.add(name)
+                    print(f'server:{name}')
+except Exception:
+    pass
+PY
+}
+
+# ── Mirror-agent daemon (background, idempotent) ─────────────────────────
+
+_mirror_agent_healthy() {
+    local port_file="$1" port
+    [ -f "$port_file" ] || return 1
+    port=$(cat "$port_file" 2>/dev/null || true)
+    [ -n "$port" ] || return 1
+    curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1 || return 1
+}
+
+start_mirror_agent() {
+    local uid port_file agent_bin hub_url
+    uid="$(id -u)"
+    port_file="/tmp/claude-net/mirror-agent-${uid}.port"
+    mkdir -p "/tmp/claude-net"
+
+    if _mirror_agent_healthy "$port_file"; then
+        return 0
+    fi
+
+    agent_bin="$HOME/.local/bin/claude-net-mirror-agent"
+    if [ ! -x "$agent_bin" ]; then
+        return 0    # not installed; skip silently
+    fi
+
+    hub_url="${CLAUDE_NET_HUB:-}"
+    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
+        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 - <<'PY' 2>/dev/null || true
+import json, os
+try:
+    with open(os.environ['CLAUDE_JSON']) as f:
+        d = json.load(f)
+    for scope in [d.get('mcpServers', {}),
+                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
+        cfg = scope.get('claude-net')
+        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
+            print(cfg['env']['CLAUDE_NET_HUB'])
+            break
+except Exception:
+    pass
+PY
+)
+    fi
+    export CLAUDE_NET_HUB="${hub_url:-http://localhost:4815}"
+
+    nohup "$agent_bin" </dev/null >>"/tmp/claude-net/mirror-agent-${uid}.log" 2>&1 &
+    disown 2>/dev/null || true
+}
+
+start_mirror_agent
+
+# ── Compose the arg list ────────────────────────────────────────────────
+
+EXTRA_ARGS=()
+already_has_channels=false
+for arg in "$@"; do
+    if [ "$arg" = "--dangerously-load-development-channels" ] || [ "$arg" = "--channels" ]; then
+        already_has_channels=true
+        break
+    fi
+done
+
+if ! $already_has_channels; then
+    CHANNEL_ARGS=()
+    while IFS= read -r server; do
+        [ -n "$server" ] && CHANNEL_ARGS+=("$server")
+    done < <(find_channel_servers)
+    if [ ${#CHANNEL_ARGS[@]} -gt 0 ]; then
+        EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
+    fi
+fi
+
+# Signal to the plugin that channels are known-loaded (env-var bypass
+# for the LLM self-test ceremony) — same trick claude-channels uses.
+export CLAUDE_NET_CHANNELS_PATCHED=1
+
+exec "$CLAUDE_V2" "${EXTRA_ARGS[@]}" "$@"

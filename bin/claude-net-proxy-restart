@@ -1,0 +1,41 @@
+#!/bin/bash
+# Kill any running cc-local-router proxy and start a fresh one from
+# ~/cc-local-router/proxy/index.ts. Use after editing the proxy code.
+
+REPO="${CC_LOCAL_ROUTER_REPO:-$HOME/cc-local-router}"
+STATE="$HOME/.local/state/cc-local-router"
+LOG="$STATE/proxy.log"
+mkdir -p "$STATE"
+
+# Find all bun processes running proxy/index.ts
+pids=()
+for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    if [ -r "/proc/$pid/cmdline" ] && \
+       tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'proxy/index.ts'; then
+        pids+=("$pid")
+    fi
+done
+
+if [ ${#pids[@]} -gt 0 ]; then
+    echo "killing existing proxy: ${pids[*]}"
+    kill "${pids[@]}" 2>/dev/null
+    sleep 1
+fi
+
+cd "$REPO" || { echo "$REPO not found"; exit 1; }
+setsid bun --watch proxy/index.ts </dev/null >>"$LOG" 2>&1 &
+disown 2>/dev/null || true
+sleep 2
+
+url="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8787}"
+if curl -sSf --max-time 2 "$url/healthz" >/dev/null 2>&1; then
+    build=$(curl -sSf --max-time 2 "$url/version" 2>/dev/null)
+    echo "proxy back up at $url"
+    if [ -n "$build" ]; then
+        echo "  $build"
+    fi
+else
+    echo "proxy did not answer within 2s — check $LOG"
+    exit 1
+fi
