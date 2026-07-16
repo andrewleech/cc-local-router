@@ -38,18 +38,12 @@ uv tool install git+https://github.com/andrewleech/cc-patcher \
     --with git+https://github.com/andrewleech/cc-local-router
 ```
 
-To get channels as well, add claude-net's provider in the same command:
-
-```bash
-uv tool install git+https://github.com/andrewleech/cc-patcher \
-    --with git+https://github.com/andrewleech/cc-local-router \
-    --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext"
-```
-
-`cc-patcher launch` then produces a binary carrying both patch sets —
-model alias plus channels — in one pass. Neither provider needs to know
-the other is installed. (For local development, point the same commands
-at working-tree paths instead of the git URLs.)
+`cc-patcher launch` then produces a patched binary carrying the
+model-alias patches. cc-patcher can host several providers in one
+environment side by side; a later `uv tool upgrade cc-patcher` refreshes
+them all without dropping any. See cc-patcher's README for the list of
+supported provider plugins. (For local development, point the install
+command at a working-tree path instead of the git URL.)
 
 ## Running
 
