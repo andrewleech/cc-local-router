@@ -48,9 +48,9 @@ class ResolverSwitchPatchTests(unittest.TestCase):
         edits = patch.discover(ctx)
         self.assertEqual(len(edits), 1)
         edit = edits[0]
-        self.assertEqual(edit.old, b"default:return null")
+        self.assertEqual(edit.old, b"default:")
         self.assertIn(b'case"local":return vPn(t);', edit.new)
-        self.assertTrue(edit.new.endswith(b"default:return null"))
+        self.assertTrue(edit.new.endswith(b"default:"))
 
     def test_rerun_against_already_patched_output_is_a_no_op(self):
         patch = ResolverSwitchPatch()
@@ -87,8 +87,30 @@ class ResolverSwitchPatchTests(unittest.TestCase):
         edits = patch.discover(ctx)
         self.assertEqual(len(edits), 1)
         edit = edits[0]
-        self.assertEqual(edit.old, b"default:return null")
+        self.assertEqual(edit.old, b"default:")
         self.assertIn(b'case"local":return vPn(t);', edit.new)
+
+    def test_non_null_default_body_is_left_untouched(self):
+        # A build was seen where the default arm gained a fallback
+        # lookup instead of a bare `return null`. The patch must not
+        # depend on the default arm's return expression.
+        body_with_fallback_default = (
+            b'switch(e){case"opus":return rXe(t);case"sonnet":return vPn(t);'
+            b'case"haiku":return phi(t);case"fable":return dhi(t);'
+            b'case"opusplan":return vPn(t);'
+            b'case"best":{let r=SPn[KGl()];return r!==void 0?r.builtinDefault(t):rXe(t)}'
+            b'default:return z9x(e)?rXe(t):null}}'
+        )
+        patch = ResolverSwitchPatch()
+        ctx = FakeContext(body_with_fallback_default)
+        edits = patch.discover(ctx)
+        self.assertEqual(len(edits), 1)
+        edit = edits[0]
+        self.assertEqual(edit.old, b"default:")
+        self.assertIn(b'case"local":return vPn(t);', edit.new)
+        patched = bytearray(body_with_fallback_default)
+        patched[edit.offset:edit.offset + len(edit.old)] = edit.new
+        self.assertIn(b"default:return z9x(e)?rXe(t):null", bytes(patched))
 
 
 if __name__ == "__main__":

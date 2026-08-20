@@ -119,15 +119,16 @@ class ResolverSwitchPatch:
     """Add `case "<alias>":` to the API-id resolver switch (yAn).
 
     Anchor pattern matches from `case"opusplan":return XX(t);` through
-    `default:return null`, allowing any number of intervening arms. An
+    the `default:` arm, allowing any number of intervening arms. An
     intervening arm is either a return arm (`case"NAME":return BODY;`)
     or a brace-block arm (`case"NAME":{...}`); recent builds render the
     `"best"` arm as a brace block, so both forms must be traversed to
-    reach the `default` arm. The opusplan arm's resolver function
-    identifier is
-    captured and reused for the new arm — the alias resolves to the
-    same API model id as `opusplan` does, which a downstream proxy
-    can route on.
+    reach the `default` arm. The new case arm is inserted immediately
+    before `default:`, leaving the default arm's own body untouched
+    since its return expression varies across builds. The opusplan
+    arm's resolver function identifier is captured and reused for the
+    new arm — the alias resolves to the same API model id as
+    `opusplan` does, which a downstream proxy can route on.
 
     A match whose intervening arms already contain `case"<alias>":` is
     skipped — the binary already carries this patch, so re-running
@@ -145,7 +146,7 @@ class ResolverSwitchPatch:
     PATTERN = re.compile(
         rb'case"opusplan":return ([a-zA-Z0-9_$]+)\(t\);'
         rb'(?:case"[a-zA-Z0-9_$]+":(?:\{[^}]*\}|return [^;]+;))*'
-        rb'default:return null'
+        rb'default:return[^{}]+'
     )
 
     def discover(self, ctx: DiscoveryContext) -> list[Edit]:
@@ -159,11 +160,11 @@ class ResolverSwitchPatch:
             if b'case"' + alias + b'":' in block:
                 continue
             ident = m.group(1)
-            default_rel = block.rfind(b"default:return null")
+            default_rel = block.rfind(b"default:")
             if default_rel < 0:
                 continue
             default_off = m.start() + default_rel
-            old = b"default:return null"
+            old = b"default:"
             new = (
                 b'case"' + alias + b'":return ' + ident + b'(t);'
                 + old
