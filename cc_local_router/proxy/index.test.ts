@@ -90,6 +90,77 @@ test("count_tokens is not alias-routed", async () => {
   expect((await res.json()).backend).toBe("anthropic");
 });
 
+test("the served-model id replaces the alias when configured", async () => {
+  // llama.cpp validates `model` against what it has loaded, but the
+  // patched picker can only ever send the alias.
+  const seen: unknown[] = [];
+  const backend = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      seen.push((await req.json()).model);
+      return Response.json({ ok: true });
+    },
+  });
+  process.env.CLAUDE_NET_PROXY_LOCAL_URL = `http://127.0.0.1:${backend.port}`;
+  process.env.CLAUDE_NET_PROXY_LOCAL_MODEL = "qwen3.8-27b";
+  const mod = await import(`./index.ts?rewrite=${backend.port}`);
+  const isolated = Bun.serve({ port: 0, fetch: mod.handle });
+
+  await fetch(`http://127.0.0.1:${isolated.port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "local", max_tokens: 8, messages: [] }),
+  });
+  expect(seen).toEqual(["qwen3.8-27b"]);
+
+  // Non-alias traffic keeps its own model name.
+  await fetch(`http://127.0.0.1:${isolated.port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "sonnet", messages: [] }),
+  });
+  expect(seen).toEqual(["qwen3.8-27b"]);
+
+  delete process.env.CLAUDE_NET_PROXY_LOCAL_MODEL;
+  isolated.stop(true);
+  backend.stop(true);
+});
+
+test("other body fields survive the model rewrite", async () => {
+  let body: Record<string, unknown> = {};
+  const backend = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      body = await req.json();
+      return Response.json({ ok: true });
+    },
+  });
+  process.env.CLAUDE_NET_PROXY_LOCAL_URL = `http://127.0.0.1:${backend.port}`;
+  process.env.CLAUDE_NET_PROXY_LOCAL_MODEL = "served-id";
+  const mod = await import(`./index.ts?keep=${backend.port}`);
+  const isolated = Bun.serve({ port: 0, fetch: mod.handle });
+  await fetch(`http://127.0.0.1:${isolated.port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "local",
+      max_tokens: 99,
+      system: "sys",
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+  expect(body.model).toBe("served-id");
+  expect(body.max_tokens).toBe(99);
+  expect(body.system).toBe("sys");
+  expect(body.stream).toBe(true);
+  expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
+
+  delete process.env.CLAUDE_NET_PROXY_LOCAL_MODEL;
+  isolated.stop(true);
+  backend.stop(true);
+});
+
 test("a malformed body is rejected without contacting an upstream", async () => {
   const res = await fetch(`${base}/v1/messages`, {
     method: "POST",

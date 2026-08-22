@@ -17,18 +17,30 @@
  * this runs under `bun index.ts` with no `bun install` step. That is
  * what lets the Python package ship it as data and start it directly.
  *
- * Config (all env vars):
+ * Config, each read from the environment first, then from the `env`
+ * block of ~/.claude/settings.json. The settings file is the better
+ * home for per-machine backend details: it is where Claude Code already
+ * looks, so the values stay put whether the proxy was started by a
+ * launcher, by `cc-local-router-proxy`, or by hand.
+ *
  *   CLAUDE_PATCHER_MODEL_ALIAS   model name that routes local (default "local")
  *                                — same var the patcher uses, so alias
  *                                stays defined in one place
  *   CLAUDE_NET_PROXY_LOCAL_URL   local backend URL (default http://127.0.0.1:8080)
+ *   CLAUDE_NET_PROXY_LOCAL_MODEL served-model id to send to the local backend
+ *                                in place of the alias. Unset forwards the
+ *                                alias as-is; set it when the backend
+ *                                validates `model` against its loaded
+ *                                model's exact name.
  *   CLAUDE_NET_PROXY_UPSTREAM    default upstream (default https://api.anthropic.com)
  *   CLAUDE_NET_PROXY_HOST        bind host (default 127.0.0.1)
  *   CLAUDE_NET_PROXY_PORT        bind port (default 8787)
  */
 
 import { execSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Build identifier — used by /version so `curl /version` shows exactly
 // which source revision the running proxy came from. mtime is always
@@ -73,25 +85,52 @@ const BUILD_INFO = (() => {
   };
 })();
 
-const ALIAS = process.env.CLAUDE_PATCHER_MODEL_ALIAS ?? "local";
-const LOCAL_URL = (
-  process.env.CLAUDE_NET_PROXY_LOCAL_URL ?? "http://127.0.0.1:8080"
+const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+
+function settingsEnv(key: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(SETTINGS_PATH, "utf8"));
+    const val = parsed?.env?.[key];
+    return typeof val === "string" && val !== "" ? val : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Environment first, then ~/.claude/settings.json, then the default.
+function conf(key: string): string | undefined;
+function conf(key: string, fallback: string): string;
+function conf(key: string, fallback?: string): string | undefined {
+  return process.env[key] || settingsEnv(key) || fallback;
+}
+
+const ALIAS = conf("CLAUDE_PATCHER_MODEL_ALIAS", "local");
+const LOCAL_URL = conf(
+  "CLAUDE_NET_PROXY_LOCAL_URL", "http://127.0.0.1:8080",
 ).replace(/\/$/, "");
-const DEFAULT_UPSTREAM = (
-  process.env.CLAUDE_NET_PROXY_UPSTREAM ?? "https://api.anthropic.com"
+const DEFAULT_UPSTREAM = conf(
+  "CLAUDE_NET_PROXY_UPSTREAM", "https://api.anthropic.com",
 ).replace(/\/$/, "");
-const HOST = process.env.CLAUDE_NET_PROXY_HOST ?? "127.0.0.1";
-const PORT = Number(process.env.CLAUDE_NET_PROXY_PORT ?? 8787);
+// Unset means "forward the alias unchanged".
+const LOCAL_MODEL = conf("CLAUDE_NET_PROXY_LOCAL_MODEL");
+const HOST = conf("CLAUDE_NET_PROXY_HOST", "127.0.0.1");
+const PORT = Number(conf("CLAUDE_NET_PROXY_PORT", "8787"));
 
 interface RouteDecision {
   upstream: string;
   backendLabel: string;
+  /** The model id to send upstream, which is not always the one the
+   *  client asked for -- see LOCAL_MODEL. */
   model: string;
 }
 
 function pickBackend(model: string): RouteDecision {
   if (model === ALIAS) {
-    return { upstream: LOCAL_URL, backendLabel: "local", model };
+    return {
+      upstream: LOCAL_URL,
+      backendLabel: "local",
+      model: LOCAL_MODEL ?? model,
+    };
   }
   return { upstream: DEFAULT_UPSTREAM, backendLabel: "anthropic", model };
 }
@@ -297,10 +336,11 @@ async function handleMessages(request: Request, url: URL): Promise<Response> {
   const requestId = Math.random().toString(36).slice(2, 10);
   let model = "";
   let bodyText = "";
+  let parsed: Record<string, unknown> | undefined;
   try {
     bodyText = await request.text();
-    const parsed = JSON.parse(bodyText);
-    model = typeof parsed.model === "string" ? parsed.model : "";
+    parsed = JSON.parse(bodyText);
+    model = typeof parsed?.model === "string" ? parsed.model : "";
   } catch (err) {
     log("warn", "invalid_json_body", { error: String(err) });
     return errorResponse(
@@ -315,9 +355,19 @@ async function handleMessages(request: Request, url: URL): Promise<Response> {
     request_id: requestId,
     path: url.pathname,
     model,
+    routed_model: decision.model,
     backend: decision.backendLabel,
     upstream: decision.upstream,
   });
+
+  // Rewrite the outgoing `model` when the backend's served-model id
+  // differs from the alias Claude Code sends. llama.cpp and friends
+  // validate `model` against what they actually have loaded, and the
+  // patched picker can only ever send the alias.
+  const outgoingBody =
+    decision.model !== model && parsed
+      ? JSON.stringify({ ...parsed, model: decision.model })
+      : bodyText;
 
   let upstreamResp: Response;
   try {
@@ -325,7 +375,7 @@ async function handleMessages(request: Request, url: URL): Promise<Response> {
       request,
       url.pathname + url.search,
       decision.upstream,
-      bodyText,
+      outgoingBody,
     );
   } catch (err) {
     log("error", "upstream_unreachable", {

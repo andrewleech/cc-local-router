@@ -1,4 +1,6 @@
-"""Readers for `~/.claude.json`, the Claude Code user config.
+"""Readers for Claude Code's own config: `~/.claude.json` for MCP
+servers and API-key approvals, `~/.claude/settings.json` for the `env`
+block.
 
 Every accessor is best-effort: a missing, unreadable or unexpected
 config yields an empty result rather than raising, because none of the
@@ -17,13 +19,36 @@ def config_path() -> Path:
     return Path.home() / CONFIG_NAME
 
 
-def _load() -> dict[str, Any]:
+def settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _load_file(path: Path) -> dict[str, Any]:
     try:
-        with open(config_path()) as f:
+        with open(path) as f:
             data = json.load(f)
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _load() -> dict[str, Any]:
+    return _load_file(config_path())
+
+
+def settings_env(key: str) -> str | None:
+    """`key` from the `env` block of ~/.claude/settings.json.
+
+    Claude Code applies that block to its own environment at startup,
+    so a launcher that exports its own default for the same variable
+    would silently win over the user's settings. Consulting the file
+    first keeps settings.json authoritative.
+    """
+    env = _load_file(settings_path()).get("env")
+    if not isinstance(env, dict):
+        return None
+    val = env.get(key)
+    return val if isinstance(val, str) and val else None
 
 
 def _mcp_servers(scope: Any) -> dict[str, Any]:

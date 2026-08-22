@@ -66,8 +66,18 @@ _DEFAULT_HUB = "http://localhost:4815"
 
 
 def _apply_env_defaults() -> None:
+    """Environment first, then ~/.claude/settings.json, then the
+    built-in default -- the same precedence the proxy uses.
+
+    Consulting settings.json matters: Claude Code applies that file's
+    `env` block itself, but an explicitly-exported variable beats it, so
+    unconditionally exporting a default here would silently override the
+    user's own picker label or backend URL.
+    """
     for key, value in _ENV_DEFAULTS.items():
-        os.environ.setdefault(key, value)
+        if key in os.environ:
+            continue
+        os.environ[key] = claude_json.settings_env(key) or value
 
 
 def _settle_api_key() -> None:

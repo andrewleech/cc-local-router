@@ -88,13 +88,46 @@ The proxy binds the host and port parsed out of `ANTHROPIC_BASE_URL`, so
 the launcher can't end up polling one port while the proxy listens on
 another.
 
-Env vars, all optional:
+### The local backend must speak the Anthropic Messages API
+
+The proxy is a pure byte-stream reverse proxy — it does not translate
+between API shapes. The backend behind `CLAUDE_NET_PROXY_LOCAL_URL` must
+serve `POST /v1/messages` in Anthropic format itself. Several local
+servers now do, so no translation layer is needed:
+
+- **llama.cpp / llama-server** — native since
+  [PR #17570](https://github.com/ggml-org/llama.cpp/pull/17570);
+  streaming, tool use (`--jinja`), and `count_tokens`.
+- **ollama** — v0.14+, but no `count_tokens` endpoint.
+- **vLLM**, **LM Studio** (0.4.1+), **llamafile**.
+
+An OpenAI-compatible-only backend will not work as-is.
+
+## Configuration
+
+Every setting is read from the environment first, then from the `env`
+block of `~/.claude/settings.json`, then a built-in default. Putting
+per-machine backend details in `settings.json` is usually better: Claude
+Code already reads that file, and the launchers deliberately consult it
+before exporting their own defaults so they can't override you.
+
+```json
+{
+  "env": {
+    "CLAUDE_NET_PROXY_LOCAL_URL": "http://titan:8080",
+    "CLAUDE_NET_PROXY_LOCAL_MODEL": "qwen3.8-27b",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "qwen3.8-27b",
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION": "Local inference server (titan)"
+  }
+}
+```
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CLAUDE_PATCHER_MODEL_ALIAS` | `local` | alias that routes to the local backend; also the name the patches insert |
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8787` | where Claude Code sends traffic, and what the proxy binds |
 | `CLAUDE_NET_PROXY_LOCAL_URL` | `http://127.0.0.1:8080` | the local inference server |
+| `CLAUDE_NET_PROXY_LOCAL_MODEL` | — | served-model id to send in place of the alias. Needed when the backend validates `model` against its loaded model's exact name, which llama.cpp does — the patched picker can only ever send the alias |
 | `CLAUDE_NET_PROXY_UPSTREAM` | `https://api.anthropic.com` | everything that isn't the alias |
 | `CC_LOCAL_ROUTER_REPO` | — | run the proxy from a working tree instead of the installed copy |
 | `CC_LOCAL_ROUTER_PROXY` | — | run a specific `index.ts` |

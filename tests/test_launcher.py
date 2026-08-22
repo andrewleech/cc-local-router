@@ -69,6 +69,33 @@ class EnvDefaultTests(LauncherTestCase):
         launcher.claude_v2(["--print", "hi"])
         self.assertEqual(self.execs, [["--print", "hi"]])
 
+    def test_settings_json_beats_the_builtin_default(self):
+        # Claude Code applies settings.json's env block itself, so
+        # exporting our default unconditionally would override the
+        # user's own picker label.
+        with mock.patch.object(
+            launcher.claude_json, "settings_env",
+            side_effect=lambda k: (
+                "qwen3.8-27b" if k == "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"
+                else None
+            ),
+        ):
+            launcher.claude_v2([])
+        self.assertEqual(
+            os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"], "qwen3.8-27b",
+        )
+        self.assertEqual(os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"], "local")
+
+    def test_the_environment_beats_settings_json(self):
+        os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "from-shell"
+        with mock.patch.object(
+            launcher.claude_json, "settings_env", return_value="from-settings",
+        ):
+            launcher.claude_v2([])
+        self.assertEqual(
+            os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"], "from-shell",
+        )
+
 
 class ApiKeyTests(LauncherTestCase):
     def test_a_stray_api_key_is_dropped(self):

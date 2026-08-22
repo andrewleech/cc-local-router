@@ -89,6 +89,47 @@ class HubUrlTests(ClaudeJsonTestCase):
         self.assertIsNone(claude_json.hub_url())
 
 
+class SettingsEnvTests(ClaudeJsonTestCase):
+    def write_settings(self, env):
+        d = self.home / ".claude"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "settings.json").write_text(json.dumps({"env": env}))
+
+    def test_value_is_read_from_the_env_block(self):
+        self.write_settings({"CLAUDE_NET_PROXY_LOCAL_URL": "http://titan:8080"})
+        self.assertEqual(
+            claude_json.settings_env("CLAUDE_NET_PROXY_LOCAL_URL"),
+            "http://titan:8080",
+        )
+
+    def test_absent_key_yields_none(self):
+        self.write_settings({"OTHER": "x"})
+        self.assertIsNone(claude_json.settings_env("CLAUDE_NET_PROXY_LOCAL_URL"))
+
+    def test_empty_string_counts_as_unset(self):
+        self.write_settings({"CLAUDE_NET_PROXY_LOCAL_MODEL": ""})
+        self.assertIsNone(claude_json.settings_env("CLAUDE_NET_PROXY_LOCAL_MODEL"))
+
+    def test_non_string_values_are_ignored(self):
+        self.write_settings({"CLAUDE_NET_PROXY_PORT": 8787})
+        self.assertIsNone(claude_json.settings_env("CLAUDE_NET_PROXY_PORT"))
+
+    def test_missing_settings_file_yields_none(self):
+        self.assertIsNone(claude_json.settings_env("ANYTHING"))
+
+    def test_malformed_settings_file_yields_none(self):
+        d = self.home / ".claude"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "settings.json").write_text("{not json")
+        self.assertIsNone(claude_json.settings_env("ANYTHING"))
+
+    def test_settings_without_an_env_block_yields_none(self):
+        d = self.home / ".claude"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "settings.json").write_text(json.dumps({"model": "opus"}))
+        self.assertIsNone(claude_json.settings_env("ANYTHING"))
+
+
 class ApproveApiKeyTests(ClaudeJsonTestCase):
     KEY = "sk-ant-0123456789abcdefghijklmnop"
 
