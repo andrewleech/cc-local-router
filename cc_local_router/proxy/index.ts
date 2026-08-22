@@ -471,6 +471,7 @@ if (import.meta.main) {
     bind: `${HOST}:${PORT}`,
     alias: ALIAS,
     local_url: LOCAL_URL,
+    local_model: LOCAL_MODEL ?? null,
     default_upstream: DEFAULT_UPSTREAM,
     build: BUILD_INFO,
   });
