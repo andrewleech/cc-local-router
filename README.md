@@ -141,30 +141,88 @@ uv run --with pytest pytest tests/    # patches, config readers, proxy control
 bun test cc_local_router/proxy/       # proxy routing contract
 ```
 
-## Why patch the binary instead of wrapping it
+## What Claude Code already does for external models
 
-Claude Code only lets you select a model at two places: a `model:`
-field (subagent frontmatter, `--model`, the `Workflow` tool's `model`
-option) and `agentType` (subagent type). Both are resolved against
-lists baked into the binary — the zod enum on the Agent tool, the
-alias allowlists, the CLI/TUI pickers, and the resolver switch that
-turns a model name into an API model id. A name that isn't in those
-lists doesn't exist as a model, full stop.
+Claude Code has built-in support for pointing at a non-Anthropic
+backend, and most of what this repo exists for is available without
+patching anything. Verified empirically against 2.1.239; treat it as
+liable to drift.
 
-An MCP server can add tools, but it can't add entries to those lists.
-Wrapping another inference backend behind an MCP tool makes it
-callable — a peer of `Read` or `Bash` — but not selectable as a model
-or subagent type. It can't be named in a subagent's `model:` field,
-passed as `agentType` to a dynamic workflow's `agent()` calls, or
-picked from the CLI/TUI model picker. At best you get a relay
-subagent that calls the tool and passes the text back, still driven by
-a real Claude model doing the tool-calling.
+**Any model id routes.** An id Claude Code has never heard of is passed
+through to `ANTHROPIC_BASE_URL` unchanged, so the proxy alone is enough
+to serve it. That holds for `--model <id>`, for a subagent whose
+frontmatter says `model: <id>` (dispatched by `subagent_type`), and for
+a dynamic workflow's `agent(prompt, {model: "<id>"})`. None of those
+validate against a list.
 
-Patching adds the alias directly into those lists (`model_alias.py`)
-and forces the availability gate open (`availability.py`), so the
-alias becomes a real model id everywhere Claude Code accepts one. The
-proxy then intercepts requests for that id and routes them to whatever
-actually serves it. This is what makes the alias usable natively by
-subagents, `Task`/`Agent` dispatch, and `Workflow`'s `agent()`/
-`parallel()`/`pipeline()` orchestration, with no relay hop and no
-loss of the model's own tool-use loop.
+**One labelled picker entry, free.**
+[`ANTHROPIC_CUSTOM_MODEL_OPTION`](https://code.claude.com/docs/en/model-config)
+"add[s] a single custom entry to the `/model` picker without replacing
+the built-in aliases". `_NAME` and `_DESCRIPTION` set the label, and
+notably only take effect when `ANTHROPIC_BASE_URL` points at a gateway —
+i.e. exactly this setup. `_SUPPORTED_CAPABILITIES` declares what the
+model can do (`effort`, `xhigh_effort`, `max_effort`, `thinking`,
+`adaptive_thinking`, `interleaved_thinking`). `launcher.py` sets the
+first three by default; this is why the deeper picker patches described
+as S7–S10 in the architecture doc were never built.
+
+**A whole list of entries, also free.**
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code fetch
+`{ANTHROPIC_BASE_URL}/v1/models?limit=1000` and add every entry to the
+picker, labelled from each entry's `display_name`. Set
+`CLAUDE_NET_PROXY_MODELS` and the proxy serves that endpoint. Ids must
+match `/(claude|anthropic)/i` or Claude Code filters them out, hence the
+`anthropic.` prefix convention.
+
+Two settings that look relevant and are not: `modelOverrides` maps a
+*known* Anthropic model id to a provider-specific one (a Bedrock
+inference profile ARN, say) and cannot introduce a new model;
+`availableModels` is primarily a managed-policy restriction list, and
+constrains the built-ins when set.
+
+Unknown ids do draw a warning that Claude Code cannot tell how big their
+context window is, so it assumes 200k. That is cosmetic — set
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the real window, or
+`CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` to silence it.
+
+## What the patches are still needed for
+
+Two things, both narrow.
+
+**The Agent tool's `model` override is a hard enum.** Its schema
+declares the four built-in tiers as a literal, and enforces them at call
+time rather than advisorily — an id outside the list is rejected with
+`Invalid option: expected one of ...`, naming exactly the permitted
+values. On a patched binary that rejection lists the injected alias
+alongside the four built-ins, which is the clearest demonstration that
+the patch is what puts it there: `ANTHROPIC_CUSTOM_MODEL_OPTION` does
+not feed this list, because the picker and this schema are unrelated
+code paths. Appending the alias here is the only way the *orchestrating*
+model can choose a custom backend ad hoc for a single dispatch.
+
+Note the asymmetry: a subagent *pinned* to a model in its frontmatter
+needs none of this, and neither does `Workflow`'s `agent({model})` —
+the workflow engine spawns subagents directly rather than through the
+Agent tool schema, so an arbitrary id passes through and is honoured.
+Patching buys per-call model *selection*, not model *usability*.
+
+**Managed `availableModels` policy.** `availability.py` forces the
+`xa()` gate open so a custom model survives an enterprise allowlist. A
+no-op on accounts without one.
+
+Everything else `model_alias.py` touches — the alias allowlist and the
+CLI/TUI picker arrays — is now largely redundant with the two documented
+env vars above. It is kept because it costs nothing and makes the alias
+behave identically whether or not those vars are set.
+
+## Why not do this over MCP instead
+
+An MCP server can add tools, but it cannot add a model. Wrapping another
+backend behind an MCP tool makes it callable — a peer of `Read` or
+`Bash` — but not *selectable*: it can't be named in a subagent's
+`model:` field, passed as a workflow `agent({model})`, or picked from
+`/model`. The best available shape is a relay subagent that forwards to
+the tool and hands the text back, still driven by a real Claude model
+doing the tool-calling, which loses the alternate model's own tool-use
+loop and context management. Routing at `ANTHROPIC_BASE_URL` keeps the
+other model a first-class model.
