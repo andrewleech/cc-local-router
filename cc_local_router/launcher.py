@@ -104,11 +104,34 @@ def _exec_patched(argv: list[str]) -> int:
     os.execv(str(patched), [str(patched), *argv])
 
 
+def _bypass_dead_proxy() -> None:
+    """Point Claude Code straight at the upstream when the proxy is down.
+
+    ANTHROPIC_BASE_URL otherwise still names the loopback port the proxy
+    failed to bind, which fails every request rather than just losing
+    alias routing. Losing the alias is recoverable; losing the session
+    is not.
+    """
+    fallback = os.environ.get("CLAUDE_NET_PROXY_UPSTREAM")
+    if fallback:
+        os.environ["ANTHROPIC_BASE_URL"] = fallback
+    else:
+        os.environ.pop("ANTHROPIC_BASE_URL", None)
+        fallback = "Claude Code's default upstream"
+    print(
+        f"[claude-v2] proxy unavailable; sending traffic to {fallback}. "
+        f"The '{os.environ['ANTHROPIC_CUSTOM_MODEL_OPTION']}' alias will "
+        f"not route to a local backend this session.",
+        file=sys.stderr,
+    )
+
+
 def claude_v2(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     _apply_env_defaults()
     _settle_api_key()
-    proxy_control.ensure_running()
+    if not proxy_control.ensure_running():
+        _bypass_dead_proxy()
     return _exec_patched(argv)
 
 
