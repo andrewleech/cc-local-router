@@ -161,6 +161,74 @@ test("other body fields survive the model rewrite", async () => {
   backend.stop(true);
 });
 
+test("configured options are served from /v1/models and routed", async () => {
+  // Claude Code's gateway discovery GETs this list and adds each entry
+  // to the picker. Ids must match /(claude|anthropic)/i or it drops
+  // them, hence the anthropic. prefix.
+  const backend = Bun.serve({
+    port: 0,
+    fetch: async (req) =>
+      Response.json({ backend: "option", model: (await req.json()).model }),
+  });
+  const upstream = Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json({ data: [{ type: "model", id: "claude-opus-5" }] }),
+  });
+  process.env.CLAUDE_NET_PROXY_UPSTREAM = `http://127.0.0.1:${upstream.port}`;
+  process.env.CLAUDE_NET_PROXY_MODELS = JSON.stringify([
+    {
+      id: "anthropic.qwen",
+      display_name: "Qwen (titan)",
+      url: `http://127.0.0.1:${backend.port}`,
+      model: "qwen3.8-27b",
+    },
+  ]);
+  const mod = await import(`./index.ts?models=${backend.port}`);
+  const iso = Bun.serve({ port: 0, fetch: mod.handle });
+  const at = `http://127.0.0.1:${iso.port}`;
+
+  const listed = await (await fetch(`${at}/v1/models`)).json();
+  const ids = listed.data.map((m: any) => m.id);
+  expect(ids).toContain("anthropic.qwen");
+  expect(ids).toContain("claude-opus-5"); // upstream entries survive
+  const mine = listed.data.find((m: any) => m.id === "anthropic.qwen");
+  expect(mine.display_name).toBe("Qwen (titan)");
+  expect(mine.type).toBe("model");
+
+  // Selecting it routes to that option's backend, with its served id.
+  const res = await (await fetch(`${at}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "anthropic.qwen", messages: [] }),
+  })).json();
+  expect(res).toEqual({ backend: "option", model: "qwen3.8-27b" });
+
+  delete process.env.CLAUDE_NET_PROXY_MODELS;
+  delete process.env.CLAUDE_NET_PROXY_UPSTREAM;
+  iso.stop(true);
+  backend.stop(true);
+  upstream.stop(true);
+});
+
+test("a malformed models config is ignored rather than fatal", async () => {
+  const upstream = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ backend: "anthropic" }),
+  });
+  process.env.CLAUDE_NET_PROXY_UPSTREAM = `http://127.0.0.1:${upstream.port}`;
+  process.env.CLAUDE_NET_PROXY_MODELS = "{not an array}";
+  const mod = await import("./index.ts?badmodels=1");
+  const iso = Bun.serve({ port: 0, fetch: mod.handle });
+  // With no usable options the endpoint reverts to plain passthrough.
+  const res = await fetch(`http://127.0.0.1:${iso.port}/v1/models`);
+  expect((await res.json()).backend).toBe("anthropic");
+  delete process.env.CLAUDE_NET_PROXY_MODELS;
+  delete process.env.CLAUDE_NET_PROXY_UPSTREAM;
+  iso.stop(true);
+  upstream.stop(true);
+});
+
 test("a malformed body is rejected without contacting an upstream", async () => {
   const res = await fetch(`${base}/v1/messages`, {
     method: "POST",

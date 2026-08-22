@@ -113,6 +113,40 @@ const DEFAULT_UPSTREAM = conf(
 ).replace(/\/$/, "");
 // Unset means "forward the alias unchanged".
 const LOCAL_MODEL = conf("CLAUDE_NET_PROXY_LOCAL_MODEL");
+
+/** A selectable model backed by some upstream.
+ *
+ *  `id` is what Claude Code sees and sends. It must match
+ *  /(claude|anthropic)/i or Claude Code's gateway discovery filters it
+ *  out, hence the `anthropic.` prefix convention.
+ *  `model` is the id the backend itself wants, when that differs. */
+interface ModelOption {
+  id: string;
+  display_name?: string;
+  url: string;
+  model?: string;
+}
+
+function parseModels(raw: string | undefined): ModelOption[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("not an array");
+    return parsed.filter((m) => typeof m?.id === "string" && typeof m?.url === "string");
+  } catch (err) {
+    log("error", "bad_models_config", {
+      var: "CLAUDE_NET_PROXY_MODELS",
+      error: String(err),
+    });
+    return [];
+  }
+}
+
+const MODELS = parseModels(conf("CLAUDE_NET_PROXY_MODELS"));
+// Anthropic's /v1/models entries carry a created_at; Claude Code only
+// reads id and display_name, so a fixed value keeps the response shape
+// valid without inventing per-model dates.
+const MODEL_CREATED_AT = "2025-01-01T00:00:00Z";
 const HOST = conf("CLAUDE_NET_PROXY_HOST", "127.0.0.1");
 const PORT = Number(conf("CLAUDE_NET_PROXY_PORT", "8787"));
 
@@ -125,6 +159,14 @@ interface RouteDecision {
 }
 
 function pickBackend(model: string): RouteDecision {
+  const option = MODELS.find((m) => m.id === model);
+  if (option) {
+    return {
+      upstream: option.url.replace(/\/$/, ""),
+      backendLabel: `option:${option.id}`,
+      model: option.model ?? option.id,
+    };
+  }
   if (model === ALIAS) {
     return {
       upstream: LOCAL_URL,
@@ -437,9 +479,60 @@ async function handlePassthrough(
   }
 }
 
+// GET /v1/models is how Claude Code discovers extra selectable models:
+// with CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY set it fetches this
+// list from ANTHROPIC_BASE_URL and adds each entry to the /model picker,
+// labelled from display_name. Our options are appended to whatever the
+// default upstream reports so the built-in models keep showing up.
+async function handleModels(request: Request, url: URL): Promise<Response> {
+  const mine = MODELS.map((m) => ({
+    type: "model",
+    id: m.id,
+    display_name: m.display_name ?? m.id,
+    created_at: MODEL_CREATED_AT,
+  }));
+
+  let upstreamData: unknown[] = [];
+  let upstreamStatus = 0;
+  try {
+    const resp = await forward(
+      request, url.pathname + url.search, DEFAULT_UPSTREAM, undefined,
+    );
+    upstreamStatus = resp.status;
+    if (resp.ok) {
+      const body = await resp.json();
+      if (Array.isArray(body?.data)) upstreamData = body.data;
+    }
+  } catch (err) {
+    log("warn", "models_upstream_unreachable", { error: String(err) });
+  }
+
+  const seen = new Set(mine.map((m) => m.id));
+  const merged = [
+    ...upstreamData.filter(
+      (m: any) => typeof m?.id === "string" && !seen.has(m.id),
+    ),
+    ...mine,
+  ];
+  log("info", "models", {
+    upstream_status: upstreamStatus,
+    upstream_count: upstreamData.length,
+    option_count: mine.length,
+  });
+  return Response.json({
+    data: merged,
+    has_more: false,
+    first_id: merged[0] ? (merged[0] as any).id : null,
+    last_id: merged.length ? (merged[merged.length - 1] as any).id : null,
+  });
+}
+
 export async function handle(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname;
+  if (request.method === "GET" && path === "/v1/models" && MODELS.length) {
+    return handleModels(request, url);
+  }
   if (request.method === "GET" && path === "/healthz") {
     return Response.json({ status: "ok" });
   }
