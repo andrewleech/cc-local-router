@@ -240,9 +240,10 @@ test("a malformed body is rejected without contacting an upstream", async () => 
 });
 
 test("an unreachable upstream surfaces as a 502 api_error", async () => {
-  const dead = Bun.serve({ port: 0, fetch: () => new Response("x") });
-  const port = dead.port;
-  dead.stop(true);
+  // Port 9 (discard) is privileged, so the ephemeral ports the rest of
+  // this suite binds can never land on it. Releasing a port we just
+  // bound would race against those.
+  const port = 9;
   process.env.CLAUDE_NET_PROXY_LOCAL_URL = `http://127.0.0.1:${port}`;
   // LOCAL_URL was captured at import time, so re-import in a fresh
   // registry to pick up the dead address.

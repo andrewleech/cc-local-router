@@ -95,13 +95,10 @@ class LoopbackTests(unittest.TestCase):
 
 class ProbeTests(unittest.TestCase):
     def test_an_unbound_port_is_not_healthy(self):
-        # Bind then release to get a port nothing is listening on.
-        import socket
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
+        # Port 9 (discard) is privileged, so nothing in a test run can
+        # bind it; releasing a port we just bound would be racy.
         self.assertFalse(
-            proxy_control.is_healthy(f"http://127.0.0.1:{port}", timeout=0.5),
+            proxy_control.is_healthy("http://127.0.0.1:9", timeout=0.5),
         )
 
 
