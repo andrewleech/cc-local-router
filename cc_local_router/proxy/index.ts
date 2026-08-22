@@ -13,6 +13,10 @@
  * normalised, that goes in `transformResponse()` below, currently a
  * no-op passthrough.
  *
+ * Dependency-free on purpose: routing is a handful of path checks, so
+ * this runs under `bun index.ts` with no `bun install` step. That is
+ * what lets the Python package ship it as data and start it directly.
+ *
  * Config (all env vars):
  *   CLAUDE_PATCHER_MODEL_ALIAS   model name that routes local (default "local")
  *                                — same var the patcher uses, so alias
@@ -25,7 +29,6 @@
 
 import { execSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { Elysia } from "elysia";
 
 // Build identifier — used by /version so `curl /version` shows exactly
 // which source revision the running proxy came from. mtime is always
@@ -278,148 +281,142 @@ const rootProbeResponse = (method: string) =>
     },
   );
 
-export function createProxyApp(): Elysia {
-  return (
-    new Elysia()
-      .get("/healthz", () => ({ status: "ok" }))
-      .get("/version", () => BUILD_INFO)
-      .head("/", ({ request }) => rootProbeResponse(request.method))
-      .get("/", ({ request }) => rootProbeResponse(request.method))
-      .post("/v1/messages", async ({ request }) => {
-        const url = new URL(request.url);
-        const started = Date.now();
-        const requestId = Math.random().toString(36).slice(2, 10);
-        let model = "";
-        let bodyText = "";
-        try {
-          bodyText = await request.text();
-          const parsed = JSON.parse(bodyText);
-          model = typeof parsed.model === "string" ? parsed.model : "";
-        } catch (err) {
-          log("warn", "invalid_json_body", {
-            error: String(err),
-          });
-          return new Response(
-            JSON.stringify({
-              type: "error",
-              error: {
-                type: "invalid_request_error",
-                message: "invalid JSON in request body",
-              },
-            }),
-            {
-              status: 400,
-              headers: { "content-type": "application/json" },
-            },
-          );
-        }
-
-        const decision = pickBackend(model);
-        log("info", "route", {
-          request_id: requestId,
-          path: url.pathname,
-          model,
-          backend: decision.backendLabel,
-          upstream: decision.upstream,
-        });
-
-        let upstreamResp: Response;
-        try {
-          upstreamResp = await forward(
-            request,
-            url.pathname + url.search,
-            decision.upstream,
-            bodyText,
-          );
-        } catch (err) {
-          log("error", "upstream_unreachable", {
-            backend: decision.backendLabel,
-            upstream: decision.upstream,
-            error: String(err),
-          });
-          return new Response(
-            JSON.stringify({
-              type: "error",
-              error: {
-                type: "api_error",
-                message: `upstream unreachable: ${String(err)}`,
-              },
-            }),
-            {
-              status: 502,
-              headers: { "content-type": "application/json" },
-            },
-          );
-        }
-
-        log("info", "upstream_status", {
-          request_id: requestId,
-          backend: decision.backendLabel,
-          status: upstreamResp.status,
-          elapsed_ms: Date.now() - started,
-        });
-
-        return await transformResponse(
-          upstreamResp,
-          decision,
-          requestId,
-          started,
-        );
-      })
-      // Everything else — /v1/models, /v1/messages/count_tokens, etc. —
-      // falls through to the default upstream (Anthropic). Model-name
-      // routing only applies to /v1/messages, which is where it matters.
-      // Everything else — /v1/models, /v1/messages/count_tokens, etc.
-      // — falls through to the default upstream (Anthropic).
-      // Model-name routing only applies to /v1/messages.
-      .all("*", async ({ request }) => {
-        const url = new URL(request.url);
-        const started = Date.now();
-        const requestId = Math.random().toString(36).slice(2, 10);
-        try {
-          const upstream = await forward(
-            request,
-            url.pathname + url.search,
-            DEFAULT_UPSTREAM,
-            request.body ?? undefined,
-          );
-          log("info", "passthrough", {
-            request_id: requestId,
-            method: request.method,
-            path: url.pathname,
-            status: upstream.status,
-          });
-          return await transformResponse(
-            upstream,
-            {
-              upstream: DEFAULT_UPSTREAM,
-              backendLabel: "anthropic",
-              model: "",
-            },
-            requestId,
-            started,
-          );
-        } catch (err) {
-          log("error", "passthrough_unreachable", {
-            path: url.pathname,
-            error: String(err),
-          });
-          return new Response("upstream unreachable", {
-            status: 502,
-          });
-        }
-      })
+function errorResponse(
+  status: number,
+  type: string,
+  message: string,
+): Response {
+  return new Response(
+    JSON.stringify({ type: "error", error: { type, message } }),
+    { status, headers: { "content-type": "application/json" } },
   );
 }
 
+async function handleMessages(request: Request, url: URL): Promise<Response> {
+  const started = Date.now();
+  const requestId = Math.random().toString(36).slice(2, 10);
+  let model = "";
+  let bodyText = "";
+  try {
+    bodyText = await request.text();
+    const parsed = JSON.parse(bodyText);
+    model = typeof parsed.model === "string" ? parsed.model : "";
+  } catch (err) {
+    log("warn", "invalid_json_body", { error: String(err) });
+    return errorResponse(
+      400,
+      "invalid_request_error",
+      "invalid JSON in request body",
+    );
+  }
+
+  const decision = pickBackend(model);
+  log("info", "route", {
+    request_id: requestId,
+    path: url.pathname,
+    model,
+    backend: decision.backendLabel,
+    upstream: decision.upstream,
+  });
+
+  let upstreamResp: Response;
+  try {
+    upstreamResp = await forward(
+      request,
+      url.pathname + url.search,
+      decision.upstream,
+      bodyText,
+    );
+  } catch (err) {
+    log("error", "upstream_unreachable", {
+      backend: decision.backendLabel,
+      upstream: decision.upstream,
+      error: String(err),
+    });
+    return errorResponse(
+      502,
+      "api_error",
+      `upstream unreachable: ${String(err)}`,
+    );
+  }
+
+  log("info", "upstream_status", {
+    request_id: requestId,
+    backend: decision.backendLabel,
+    status: upstreamResp.status,
+    elapsed_ms: Date.now() - started,
+  });
+
+  return await transformResponse(upstreamResp, decision, requestId, started);
+}
+
+// Everything other than POST /v1/messages — /v1/models,
+// /v1/messages/count_tokens, etc. — goes to the default upstream.
+// Model-name routing only applies to /v1/messages.
+async function handlePassthrough(
+  request: Request,
+  url: URL,
+): Promise<Response> {
+  const started = Date.now();
+  const requestId = Math.random().toString(36).slice(2, 10);
+  try {
+    const upstream = await forward(
+      request,
+      url.pathname + url.search,
+      DEFAULT_UPSTREAM,
+      request.body ?? undefined,
+    );
+    log("info", "passthrough", {
+      request_id: requestId,
+      method: request.method,
+      path: url.pathname,
+      status: upstream.status,
+    });
+    return await transformResponse(
+      upstream,
+      { upstream: DEFAULT_UPSTREAM, backendLabel: "anthropic", model: "" },
+      requestId,
+      started,
+    );
+  } catch (err) {
+    log("error", "passthrough_unreachable", {
+      path: url.pathname,
+      error: String(err),
+    });
+    return new Response("upstream unreachable", { status: 502 });
+  }
+}
+
+export async function handle(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  if (request.method === "GET" && path === "/healthz") {
+    return Response.json({ status: "ok" });
+  }
+  if (request.method === "GET" && path === "/version") {
+    return Response.json(BUILD_INFO);
+  }
+  if (path === "/" && (request.method === "GET" || request.method === "HEAD")) {
+    return rootProbeResponse(request.method);
+  }
+  if (request.method === "POST" && path === "/v1/messages") {
+    return handleMessages(request, url);
+  }
+  return handlePassthrough(request, url);
+}
+
 if (import.meta.main) {
-  const app = createProxyApp();
   // idleTimeout=0 disables Bun.serve's socket-idle killer. Default (10s)
   // tears down streaming responses when Anthropic pauses for extended
   // thinking — no bytes flow to the client for 30-60s and the socket
   // closes, which the client reports as "Connection closed mid-response".
   // Max value is 255s, 0 disables entirely.
-  app.listen({ hostname: HOST, port: PORT, idleTimeout: 0 });
+  const server = Bun.serve({
+    hostname: HOST,
+    port: PORT,
+    idleTimeout: 0,
+    fetch: handle,
+  });
   log("info", "proxy_started", {
     bind: `${HOST}:${PORT}`,
     alias: ALIAS,
@@ -429,7 +426,7 @@ if (import.meta.main) {
   });
   const shutdown = () => {
     log("info", "proxy_shutting_down", {});
-    app.stop();
+    server.stop();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

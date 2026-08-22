@@ -13,19 +13,24 @@ carries the patches and proxy, not the patching engine.
 
 ## Layout
 
-- `cc_local_router/` — the `Patch`-shaped provider package
-  (`model_alias.py`, `availability.py`), registered as a `cc_patcher`
-  entry point.
-- `proxy/index.ts` — the Bun/Elysia routing proxy.
-- `bin/claude-v2` — wraps `cc-patcher launch` with the env vars the
-  model picker and proxy need, and starts the proxy on demand.
-- `bin/claude-channels-v2` — layers claude-net's channel MCP-arg
-  injection and mirror-agent autostart on top of `claude-v2`. Only
-  useful if `claude-net-patcher` (or another channel-patch provider)
-  is also installed — the channel behaviour itself comes from that
-  provider's patches, not from anything in this repo.
-- `bin/claude-net-proxy-restart` — kill + restart the proxy, for use
-  after editing `proxy/index.ts`.
+Everything ships inside the one Python package, so installing it gives
+you the patches, the proxy and the launchers together:
+
+- `model_alias.py`, `availability.py` — the `Patch`-shaped provider,
+  registered as a `cc_patcher` entry point.
+- `proxy/index.ts` — the routing proxy. Dependency-free, so Bun runs it
+  in place with no `bun install`; that is what lets it ship as package
+  data.
+- `launcher.py` — the `claude-v2` and `claude-channels-v2` console
+  scripts. `claude-v2` sets the env the picker and proxy need, starts
+  the proxy on demand, and execs the patched binary.
+  `claude-channels-v2` adds claude-net's per-MCP-server channel args and
+  mirror-agent autostart; that part is only useful alongside
+  `claude-net-patcher`, whose patches provide the channel behaviour
+  itself.
+- `proxy_control.py` — the `cc-local-router-proxy` console script:
+  `start`, `stop`, `restart`, `status`, `run`, `where`.
+- `claude_json.py` — best-effort readers for `~/.claude.json`.
 
 ## Install
 
@@ -35,30 +40,73 @@ discovered:
 
 ```bash
 uv tool install git+https://github.com/andrewleech/cc-patcher \
-    --with git+https://github.com/andrewleech/cc-local-router
+    --with git+https://github.com/andrewleech/cc-local-router \
+    --with-executables-from cc-local-router
 ```
 
-`cc-patcher launch` then produces a patched binary carrying the
-model-alias patches. cc-patcher can host several providers in one
-environment side by side; a later `uv tool upgrade cc-patcher` refreshes
-them all without dropping any. See cc-patcher's README for the list of
-supported provider plugins. (For local development, point the install
-command at a working-tree path instead of the git URL.)
+`--with-executables-from` is what puts `claude-v2`,
+`claude-channels-v2` and `cc-local-router-proxy` on `PATH`; without it
+uv installs only the primary package's executables and you get the
+patches but no launchers.
+
+cc-patcher can host several providers in one environment side by side, so
+add `claude-net-patcher` the same way for channel support:
+
+```bash
+uv tool install git+https://github.com/andrewleech/cc-patcher \
+    --with "git+https://github.com/andrewleech/claude-net#subdirectory=patcher-ext" \
+    --with git+https://github.com/andrewleech/cc-local-router \
+    --with-executables-from cc-local-router
+```
+
+A later `uv tool upgrade cc-patcher` refreshes every provider without
+dropping any. (For local development, point the install command at a
+working-tree path instead of the git URL.)
+
+Bun is the only non-Python requirement — the proxy runs under it
+directly. There is no `bun install` step and no repo checkout needed.
 
 ## Running
 
 ```bash
-bun install                 # proxy deps (elysia)
-ln -sf ~/cc-local-router/bin/claude-v2 ~/.local/bin/claude-v2
-~/.local/bin/claude-v2 --version
+claude-v2 --version
 ```
 
-`claude-v2` auto-starts the proxy (`bun --watch proxy/index.ts`) the
-first time `ANTHROPIC_BASE_URL` points at the loopback default and
-nothing is answering `/healthz` there yet. Env vars documented at the
-top of `bin/claude-v2` control the alias name, upstream URLs, and
-picker label; `CC_LOCAL_ROUTER_REPO` overrides the repo path if it's
-not checked out at `~/cc-local-router`.
+`claude-v2` auto-starts the proxy the first time `ANTHROPIC_BASE_URL`
+points at a loopback address and nothing answers `/healthz` there. A
+non-loopback base URL is left alone, on the assumption you pointed it
+somewhere deliberately.
+
+```bash
+cc-local-router-proxy status     # entry point, URL, health, pid, log
+cc-local-router-proxy restart    # after editing proxy/index.ts
+cc-local-router-proxy run        # foreground, for debugging
+cc-local-router-proxy where      # path of the index.ts actually in use
+```
+
+The proxy binds the host and port parsed out of `ANTHROPIC_BASE_URL`, so
+the launcher can't end up polling one port while the proxy listens on
+another.
+
+Env vars, all optional:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CLAUDE_PATCHER_MODEL_ALIAS` | `local` | alias that routes to the local backend; also the name the patches insert |
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8787` | where Claude Code sends traffic, and what the proxy binds |
+| `CLAUDE_NET_PROXY_LOCAL_URL` | `http://127.0.0.1:8080` | the local inference server |
+| `CLAUDE_NET_PROXY_UPSTREAM` | `https://api.anthropic.com` | everything that isn't the alias |
+| `CC_LOCAL_ROUTER_REPO` | — | run the proxy from a working tree instead of the installed copy |
+| `CC_LOCAL_ROUTER_PROXY` | — | run a specific `index.ts` |
+| `CC_LOCAL_ROUTER_PROXY_WATCH` | unset | pass `--watch` to Bun, for editing the proxy in place |
+| `CLAUDE_V2_FORCE_API_KEY` | — | use an API key instead of the OAuth login (a stray `ANTHROPIC_API_KEY` is otherwise unset, so it can't silently hijack subscription auth) |
+
+## Tests
+
+```bash
+uv run --with pytest pytest tests/    # patches, config readers, proxy control
+bun test cc_local_router/proxy/       # proxy routing contract
+```
 
 ## Why patch the binary instead of wrapping it
 

@@ -14,5 +14,14 @@ dependencies = ["cc-patcher"]
 [project.entry-points."cc_patcher.patches"]
 model-alias = "cc_local_router:PATCHES"
 
+[project.scripts]
+claude-v2 = "cc_local_router.launcher:claude_v2"
+claude-channels-v2 = "cc_local_router.launcher:claude_channels_v2"
+cc-local-router-proxy = "cc_local_router.proxy_control:main"
+
 [tool.hatch.build.targets.wheel]
+# proxy/index.ts ships as package data and is run in place by Bun, so
+# installing the package is all it takes to have a runnable proxy.
+# Its tests are the one thing not worth shipping.
 packages = ["cc_local_router"]
+exclude = ["*.test.ts"]
