@@ -59,3 +59,31 @@ nothing is answering `/healthz` there yet. Env vars documented at the
 top of `bin/claude-v2` control the alias name, upstream URLs, and
 picker label; `CC_LOCAL_ROUTER_REPO` overrides the repo path if it's
 not checked out at `~/cc-local-router`.
+
+## Why patch the binary instead of wrapping it
+
+Claude Code only lets you select a model at two places: a `model:`
+field (subagent frontmatter, `--model`, the `Workflow` tool's `model`
+option) and `agentType` (subagent type). Both are resolved against
+lists baked into the binary — the zod enum on the Agent tool, the
+alias allowlists, the CLI/TUI pickers, and the resolver switch that
+turns a model name into an API model id. A name that isn't in those
+lists doesn't exist as a model, full stop.
+
+An MCP server can add tools, but it can't add entries to those lists.
+Wrapping another inference backend behind an MCP tool makes it
+callable — a peer of `Read` or `Bash` — but not selectable as a model
+or subagent type. It can't be named in a subagent's `model:` field,
+passed as `agentType` to a dynamic workflow's `agent()` calls, or
+picked from the CLI/TUI model picker. At best you get a relay
+subagent that calls the tool and passes the text back, still driven by
+a real Claude model doing the tool-calling.
+
+Patching adds the alias directly into those lists (`model_alias.py`)
+and forces the availability gate open (`availability.py`), so the
+alias becomes a real model id everywhere Claude Code accepts one. The
+proxy then intercepts requests for that id and routes them to whatever
+actually serves it. This is what makes the alias usable natively by
+subagents, `Task`/`Agent` dispatch, and `Workflow`'s `agent()`/
+`parallel()`/`pipeline()` orchestration, with no relay hop and no
+loss of the model's own tool-use loop.
