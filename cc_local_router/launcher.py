@@ -60,6 +60,23 @@ _ENV_DEFAULTS: dict[str, str] = {
     "CLAUDE_ENABLE_STREAM_WATCHDOG": "false",
 }
 
+# Settings we have no default for, exported from ~/.claude/settings.json
+# when present. Claude Code applies its own `env` block too, but reads
+# the capability overrides straight from `process.env`, so putting them
+# there before exec avoids depending on that ordering.
+#
+# ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES is an allowlist --
+# capabilities left out of it are disabled for the custom model, so an
+# over-broad value is worse than none.
+#
+# CLAUDE_CODE_MAX_CONTEXT_TOKENS only applies to model ids that don't
+# start with `claude-`, so setting it cannot misreport a built-in
+# model's window.
+_ENV_PASSTHROUGH = (
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+)
+
 _CHANNEL_FLAGS = ("--dangerously-load-development-channels", "--channels")
 _MIRROR_AGENT = Path.home() / ".local" / "bin" / "claude-net-mirror-agent"
 _DEFAULT_HUB = "http://localhost:4815"
@@ -78,6 +95,12 @@ def _apply_env_defaults() -> None:
         if key in os.environ:
             continue
         os.environ[key] = claude_json.settings_env(key) or value
+    for key in _ENV_PASSTHROUGH:
+        if key in os.environ:
+            continue
+        configured = claude_json.settings_env(key)
+        if configured:
+            os.environ[key] = configured
 
 
 def _settle_api_key() -> None:

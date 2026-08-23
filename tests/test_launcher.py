@@ -16,6 +16,7 @@ from cc_local_router import launcher
 
 _MANAGED_VARS = (
     *launcher._ENV_DEFAULTS,
+    *launcher._ENV_PASSTHROUGH,
     "ANTHROPIC_API_KEY",
     "CLAUDE_V2_FORCE_API_KEY",
     "CLAUDE_NET_PROXY_UPSTREAM",
@@ -85,6 +86,26 @@ class EnvDefaultTests(LauncherTestCase):
             os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"], "qwen3.8-27b",
         )
         self.assertEqual(os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION"], "local")
+
+    def test_passthrough_vars_are_exported_from_settings(self):
+        # Claude Code reads the capability override straight from
+        # process.env, so it has to be there before exec.
+        with mock.patch.object(
+            launcher.claude_json, "settings_env",
+            side_effect=lambda k: (
+                "262144" if k == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" else None
+            ),
+        ):
+            launcher.claude_v2([])
+        self.assertEqual(os.environ["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144")
+
+    def test_passthrough_vars_absent_from_settings_stay_unset(self):
+        with mock.patch.object(
+            launcher.claude_json, "settings_env", return_value=None,
+        ):
+            launcher.claude_v2([])
+        for key in launcher._ENV_PASSTHROUGH:
+            self.assertNotIn(key, os.environ)
 
     def test_the_environment_beats_settings_json(self):
         os.environ["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] = "from-shell"

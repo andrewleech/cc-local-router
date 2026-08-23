@@ -132,6 +132,8 @@ before exporting their own defaults so they can't override you.
 | `CC_LOCAL_ROUTER_REPO` | — | run the proxy from a working tree instead of the installed copy |
 | `CC_LOCAL_ROUTER_PROXY` | — | run a specific `index.ts` |
 | `CC_LOCAL_ROUTER_PROXY_WATCH` | unset | pass `--watch` to Bun, for editing the proxy in place |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | — | the backend's real context window. Only applied to model ids that don't start with `claude-`, so it cannot misreport a built-in model |
+| `ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES` | — | comma-separated allowlist of `effort`, `xhigh_effort`, `max_effort`, `thinking`, `adaptive_thinking`, `interleaved_thinking`. Capabilities left out are *disabled*, so only list what the backend demonstrably does |
 | `CLAUDE_V2_FORCE_API_KEY` | — | use an API key instead of the OAuth login (a stray `ANTHROPIC_API_KEY` is otherwise unset, so it can't silently hijack subscription auth) |
 
 ## Tests
