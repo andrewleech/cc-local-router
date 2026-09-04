@@ -90,6 +90,27 @@ class ResolverSwitchPatchTests(unittest.TestCase):
         self.assertEqual(edit.old, b"default:")
         self.assertIn(b'case"local":return vPn(t);', edit.new)
 
+    def test_call_argument_identifier_drift_is_generalized(self):
+        # 2.1.259 renamed the switch's call argument from `t` to `n`
+        # (a minifier-wide rename, not specific to this switch). The
+        # anchor must capture the argument identifier rather than
+        # hardcode `t`, and the inserted arm must reuse whichever
+        # identifier this build actually uses.
+        body_with_renamed_arg = (
+            b'switch(e){case"opus":return rXe(n);case"sonnet":return vPn(n);'
+            b'case"haiku":return phi(n);case"fable":return dhi(n);'
+            b'case"opusplan":return vPn(n);'
+            b'case"best":{let r=SPn[KGl()];return r!==void 0?r.builtinDefault(n):rXe(n)}'
+            b'default:return null}'
+        )
+        patch = ResolverSwitchPatch()
+        ctx = FakeContext(body_with_renamed_arg)
+        edits = patch.discover(ctx)
+        self.assertEqual(len(edits), 1)
+        edit = edits[0]
+        self.assertEqual(edit.old, b"default:")
+        self.assertIn(b'case"local":return vPn(n);', edit.new)
+
     def test_non_null_default_body_is_left_untouched(self):
         # A build was seen where the default arm gained a fallback
         # lookup instead of a bare `return null`. The patch must not

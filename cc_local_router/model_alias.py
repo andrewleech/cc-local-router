@@ -126,9 +126,11 @@ class ResolverSwitchPatch:
     reach the `default` arm. The new case arm is inserted immediately
     before `default:`, leaving the default arm's own body untouched
     since its return expression varies across builds. The opusplan
-    arm's resolver function identifier is captured and reused for the
-    new arm — the alias resolves to the same API model id as
-    `opusplan` does, which a downstream proxy can route on.
+    arm's resolver function identifier AND its call argument are
+    captured and reused for the new arm -- both drift release to
+    release (the argument was `t` through 2.1.251, `n` from 2.1.259) --
+    so the alias resolves to the same API model id as `opusplan` does,
+    which a downstream proxy can route on.
 
     A match whose intervening arms already contain `case"<alias>":` is
     skipped — the binary already carries this patch, so re-running
@@ -144,7 +146,7 @@ class ResolverSwitchPatch:
     expect_count = 1
     diag_anchor = b'case"opusplan":'
     PATTERN = re.compile(
-        rb'case"opusplan":return ([a-zA-Z0-9_$]+)\(t\);'
+        rb'case"opusplan":return ([a-zA-Z0-9_$]+)\(([a-zA-Z0-9_$]+)\);'
         rb'(?:case"[a-zA-Z0-9_$]+":(?:\{[^}]*\}|return [^;]+;))*'
         rb'default:return[^{}]+'
     )
@@ -159,14 +161,14 @@ class ResolverSwitchPatch:
             block = m.group(0)
             if b'case"' + alias + b'":' in block:
                 continue
-            ident = m.group(1)
+            ident, arg = m.group(1), m.group(2)
             default_rel = block.rfind(b"default:")
             if default_rel < 0:
                 continue
             default_off = m.start() + default_rel
             old = b"default:"
             new = (
-                b'case"' + alias + b'":return ' + ident + b'(t);'
+                b'case"' + alias + b'":return ' + ident + b'(' + arg + b');'
                 + old
             )
             ref = ctx.containing_string_pointer(default_off)

@@ -16,10 +16,12 @@ We rewrite the body to `return!0` + padding so the function passes
 every model name regardless of policy.
 
 The function's minified NAME changes between releases (xa in 2.1.195,
-Ka in 2.1.199, likely different again in future). We anchor on the
-first line of the body — `function X(e,t){if(t?.allowlist===void 0)`
-— which is unique in the bundle and structurally stable. The body
-end is found by ctx.find_balanced_close.
+Ka in 2.1.199, Mr in 2.1.259, likely different again in future). We
+anchor on the first line of the body — `function X(e,ARG){if(ARG?.
+allowlist===void 0)` — which is unique in the bundle and structurally
+stable; ARG itself drifts too (t in 2.1.199, n in 2.1.259), so it's
+captured and matched via backreference rather than hardcoded. The
+body end is found by ctx.find_balanced_close.
 """
 
 import re
@@ -44,10 +46,11 @@ class AvailabilityGatePatch:
     may_grow = False
     expect_count = 1
     diag_anchor = b"t?.allowlist===void 0"
-    # Anchor on the body signature, not the function name — the name
-    # is minified and drifts (xa in 2.1.195, Ka in 2.1.199).
+    # Anchor on the body signature, not the function name or its second
+    # arg's identifier -- both are minified and drift release to release.
     ANCHOR_RX = re.compile(
-        rb"function [a-zA-Z0-9_$]{1,4}\(e,t\)\{(?=if\(t\?\.allowlist===void 0\))"
+        rb"function [a-zA-Z0-9_$]{1,4}\(e,([a-zA-Z0-9_$]+)\)\{"
+        rb"(?=if\(\1\?\.allowlist===void 0\))"
     )
     NEW_BODY = b"return!0"
 
